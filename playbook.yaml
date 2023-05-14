@@ -1,0 +1,50 @@
+- name: Prepare Nodes
+  hosts: syslab
+  become: yes
+  tasks:
+    - name: "Create SSH Dir"
+      when: distribute_ssh_keys
+      command: "mkdir -p /home/{{ ansible_user }}/.ssh/"
+    - name: "Distribute SSH-Pub-Keys"
+      when: distribute_ssh_keys
+      copy:
+        src: "{{ control_node_ssh_dir }}/id_rsa.pub"
+        dest: "/home/{{ ansible_user }}/.ssh/authorized_keys"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0644"
+        remote_src: False
+    - name: "Distribute SSH-Priv-Keys"
+      when: distribute_ssh_keys
+      copy:
+        src: "{{ control_node_ssh_dir }}/id_rsa"
+        dest: "/home/{{ ansible_user }}/.ssh"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0600"
+        remote_src: False
+    - name: "Install snapd"
+      apt:
+        name: snapd
+        state: present
+    - name: "Install microk8s"
+      command: sudo snap install microk8s --classic --channel=1.25
+    - name: "Configure Kubelet"
+      when: disable_eviction_on_diskpressure
+      shell: "echo '--eviction-hard=nodefs.available<0%,imagefs.available<0%' >> /var/snap/microk8s/current/args/kubelet && microk8s stop && microk8s start"
+      become_user: root
+    - name: "Initialize Master Node / Get Token"
+      when: '{{ master_node }} not in inventory_hostname'
+      shell: sudo microk8s add-node | grep -m2  -e '--worker'  | tail -n1 | sed -E 's/^[^/]*\///;s/(.{45}).*/\1/' # cuts out the token from the return of add-node command
+      register: token
+      delegate_to: "{{ master_node }}" # delegates task from worker nodes to the master node, so each of the worker nodes gets a unique token to register at the master node
+      remote_user: "{{ ansible_user }}"
+    - name: "Run worker command"
+      when: '{{ master_node }} not in inventory_hostname'
+      command: "sudo microk8s join {{ master_node }}:25000/{{ token.stdout }} --worker"
+    - name: "Enable DNS"
+      when: '{{ master_node }} in inventory_hostname'
+      command: "sudo microk8s enable dns"
+    - name: "Enable Helm"
+      when: '{{ master_node }} in inventory_hostname'
+      command: "sudo microk8s enable helm"
